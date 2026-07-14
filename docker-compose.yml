@@ -6,7 +6,7 @@ services:
       - "8080:8080"
       - "5900:5900"
     environment:
-      - LLM_URL=http://192.168.31.56:1234
+      - LLM_URL=http://192.168.31.195:1234
       - LLM_MODEL=gemma-4-e4b-it
       - GROUNDING_URL=http://192.168.31.195:1234
       - GROUNDING_MODEL=ui-tars-2b-sft

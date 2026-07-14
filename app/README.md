@@ -46,10 +46,8 @@ Each capability is triggered by a specific API endpoint. The diagram below shows
 │  POST /scan ──────────► (full page scroll + structure)         │
 │                                                                 │
 │  POST /search ────────────────────────────► [search-form]      │
-│  *(planned)*                                                    │
 │                                                                 │
 │  POST /content ───────────────────────────► [content-extract]  │
-│  *(planned)*                                                    │
 └─────────────────────────────────────────────────────────────────┘
          │                    │                    │
          ▼                    ▼                    ▼
@@ -143,7 +141,7 @@ All parameters are set via environment variables in `docker-compose.yml`:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `LLM_URL` | `192.168.31.56:1234` | Gemma 4 server address |
+| `LLM_URL` | `192.168.31.195:1234` | Gemma 4 server address |
 | `LLM_MODEL` | `gemma-4-e4b-it` | Vision model name |
 | `GROUNDING_URL` | `192.168.31.195:1234` | UI-TARS server address |
 | `GROUNDING_MODEL` | `ui-tars-2b-sft` | Grounding model name |
@@ -151,3 +149,59 @@ All parameters are set via environment variables in `docker-compose.yml`:
 | `PAGE_LOAD_TIMEOUT` | `12` | Seconds to wait for page to stabilize |
 | `MAX_POPUP_ATTEMPTS` | `3` | Popup dismiss retry count |
 | `MAX_SCROLL_SECTIONS` | `4` | Pages to scroll during scan |
+
+---
+
+## Development & Testing
+
+Tests live in `../tests/` and run locally without Docker, Xvfb, or real LLM servers.
+All LLM calls and browser interactions are replaced with mocks.
+
+### Setup (once)
+
+```bash
+# from the repo root (web-vision-agent/)
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+```
+
+### Run tests
+
+```bash
+.venv/bin/pytest -v
+```
+
+Expected output: **41 passed**.
+
+### Project structure
+
+```
+web-vision-agent/
+├── app/                        # production code
+│   ├── api.py                  # FastAPI endpoints
+│   ├── page_analyzer.py        # high-level flows (open, click, scan, search, content)
+│   ├── llm_client.py           # Gemma 4 + UI-TARS-2B calls
+│   ├── browser_control.py      # X11 mouse/keyboard/screenshot primitives
+│   └── entrypoint.py           # process manager (Xvfb, Chromium, uvicorn)
+├── tests/
+│   ├── conftest.py             # shared fixtures: mock_browser, mock_llm
+│   ├── test_llm_client.py      # JSON parsing, detect_input_fields, analyze_page_content
+│   ├── test_open_click.py      # open_page, click_element flows
+│   ├── test_search_page.py     # search_page: result_type, fallbacks, error cases
+│   └── test_content_page.py    # content_page: scroll, partial LLM response
+├── capability-specs/           # technical specs for each capability
+├── pytest.ini                  # asyncio_mode = auto, testpaths = tests
+├── requirements-dev.txt        # test dependencies (pytest, Pillow, httpx, etc.)
+├── requirements.txt            # production dependencies (inside Docker)
+├── docker-compose.yml
+└── Dockerfile
+```
+
+### What the tests cover
+
+| File | What's tested |
+|---|---|
+| `test_llm_client.py` | `_parse_json_response` (clean JSON, markdown blocks, broken input), `detect_input_fields` (happy path, LLM returns None, malformed JSON, missing key), `analyze_page_content` (screenshot cap at 3, empty list) |
+| `test_open_click.py` | `open_page` and `click_element` happy paths, `input_fields` always present in result, graceful handling of `None` from either LLM call |
+| `test_search_page.py` | `result_type` logic (page_reload / content_updated / no_change), `url_before` captured before any browser action, fallback to Enter when submit button not found, all error paths |
+| `test_content_page.py` | `full_page=False` (single screenshot), `full_page=True` (scroll + early stop at page end), scroll-to-top after scan, partial LLM response with missing keys |

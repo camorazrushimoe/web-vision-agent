@@ -263,66 +263,126 @@ async def detect_input_fields(screenshot: Image.Image) -> Optional[dict]:
     return result
 
 
-async def analyze_page_content(screenshots: list[Image.Image]) -> Optional[dict]:
+async def analyze_page_content_batch(
+    screenshots: list[Image.Image],
+    labels: list[dict],
+) -> Optional[dict]:
     """
-    Analyze the main content area of the page.
-    Returns content_type, items list, text_summary, clickable_elements.
-    Accepts multiple screenshots (full page scan), max 3 to avoid OOM on Pi.
+    Analyze a batch of screenshots (up to llm_batch_size) from a bidirectional page capture.
+    Each screenshot is labeled with its region (top/middle/bottom) and index.
+
+    labels format: [{"region": "top", "index": 1}, {"region": "bottom", "index": 1}, ...]
+
+    Returns partial analysis dict with page_type_hint, top, middle, bottom keys
+    (only regions present in this batch are filled).
     """
     if not screenshots:
         return None
 
-    # Cap at 3 screenshots to avoid payload size / timeout issues on Raspberry Pi
-    capped = screenshots[:3]
-    b64_images = [image_to_base64(img) for img in capped]
-
     content = []
-    for i, b64 in enumerate(b64_images):
+    for i, (img, label) in enumerate(zip(screenshots, labels)):
+        b64 = image_to_base64(img)
         content.append(
             {
                 "type": "image_url",
                 "image_url": {"url": f"data:image/png;base64,{b64}"},
             }
         )
-        if len(b64_images) > 1:
-            content.append(
-                {
-                    "type": "text",
-                    "text": f"[Section {i + 1} of {len(b64_images)}]",
-                }
-            )
+        content.append(
+            {
+                "type": "text",
+                "text": f"[region={label['region']} index={label['index']}]",
+            }
+        )
 
     content.append(
         {
             "type": "text",
             "text": (
-                "You are analyzing the main content area of a webpage screenshot.\n\n"
-                "Your task:\n"
-                "1. Identify the content type from this list:\n"
-                "   product_list, product_detail, article, forum_thread_list, forum_thread,\n"
-                "   contact_page, landing, dashboard, empty, unknown\n"
-                "2. Count and list visible content items (products, posts, articles, etc.). "
-                "List up to 10 items.\n"
-                "3. For each item: short label and brief description "
-                "(price, rating, date — whatever is visible)\n"
-                "4. Identify clickable elements in the content area\n"
-                "5. Write a short text summary (2-3 sentences) describing what you see, "
-                "including any readable text on the page\n\n"
-                "Return JSON only:\n"
-                '{"content_type": "...", "content_summary": "...", "items_count": N, '
-                '"items": [{"index": 1, "label": "...", "description": "..."}], '
-                '"text_summary": "...", "clickable_elements": ["...", "..."]}'
+                "You are analyzing a portion of a web page.\n"
+                "These screenshots are labeled with their region (top/middle/bottom) and index.\n\n"
+                "For each region visible in these screenshots, extract:\n"
+                "- top: navigation items, hero text or title, CTAs\n"
+                "- middle: content themes, section types and descriptions\n"
+                "- bottom: footer links, copyright/organization text\n\n"
+                "Return JSON only. Do NOT invent or guess information not visible in the screenshots.\n"
+                "If a field is not visible — use empty string or empty array.\n"
+                "Only fill regions that are actually visible. Omit others entirely.\n\n"
+                '{"page_type_hint": "landing|article|forum|product_list|unknown", '
+                '"top": {"navigation_items": [...], "hero_or_title": "...", "ctas": [...]}, '
+                '"middle": {"themes": [...], "key_sections": [{"position": "...", "type": "...", "description": "..."}]}, '
+                '"bottom": {"footer_links": [...], "copyright_or_org": "..."}}'
             ),
         }
     )
 
     messages = [{"role": "user", "content": content}]
 
-    response = await _call_llm(LLM_URL, LLM_MODEL, messages, max_tokens=2048)
+    response = await _call_llm(LLM_URL, LLM_MODEL, messages, max_tokens=1024)
     if response is None:
         return None
 
     return _parse_json_response(response)
+
+
+async def merge_content_analyses(partial_results: list[dict]) -> Optional[dict]:
+    """
+    Merge partial batch analysis results into a single coherent page analysis.
+    Called with temperature=0.0 to minimise hallucinations.
+    No screenshots — text-only LLM call.
+    """
+    if not partial_results:
+        return None
+
+    parts_text = "\n".join(
+        f"[batch {i + 1}]: {json.dumps(r, ensure_ascii=False)}"
+        for i, r in enumerate(partial_results)
+    )
+
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "You have received partial analyses of a web page from multiple screenshot batches.\n"
+                "Merge them into a single coherent result.\n\n"
+                "Rules:\n"
+                "- Only use information present in the partial results below.\n"
+                "- Do NOT invent or infer information that is not explicitly stated.\n"
+                "- If a field is missing or empty across all batches — return empty string or empty array.\n\n"
+                f"Partial results:\n{parts_text}\n\n"
+                "Return a single merged JSON:\n"
+                '{"page_type": "landing|article|forum|product_list|unknown", '
+                '"content_summary": "2-3 sentences: what is this page, what can user do here", '
+                '"top_context": {"navigation_items": [...], "hero_or_title": "...", "ctas": [...]}, '
+                '"middle_context": {"themes": [...], "key_sections": [...], "items_count_estimate": 0}, '
+                '"bottom_context": {"footer_links": [...], "copyright_or_org": "..."}}'
+            ),
+        }
+    ]
+
+    # Override temperature to 0.0 for deterministic merge
+    url = f"{LLM_URL}/v1/chat/completions"
+    payload = {
+        "model": LLM_MODEL,
+        "messages": messages,
+        "max_tokens": 1024,
+        "temperature": 0.0,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as client:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            content_str = data["choices"][0]["message"]["content"]
+    except httpx.TimeoutException:
+        logger.error("merge_content_analyses: LLM request timed out")
+        return None
+    except Exception as e:
+        logger.error(f"merge_content_analyses: request failed: {e}")
+        return None
+
+    return _parse_json_response(content_str)
 
 
 # --- Grounding (UI-TARS-2B) ---
