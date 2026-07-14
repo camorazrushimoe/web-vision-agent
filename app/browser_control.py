@@ -245,6 +245,20 @@ async def scroll_to_top():
     logger.info("Scrolled to top")
 
 
+async def scroll_up():
+    """Scroll up one viewport (Page_Up)."""
+    await press_key("Page_Up")
+    await asyncio.sleep(1.0)
+    logger.info("Scrolled up one page")
+
+
+async def scroll_to_bottom():
+    """Scroll to the very bottom of the page (ctrl+End)."""
+    await press_key("ctrl+End")
+    await asyncio.sleep(1.0)
+    logger.info("Scrolled to bottom")
+
+
 # --- Browser Health ---
 
 
