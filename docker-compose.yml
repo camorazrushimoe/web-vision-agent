@@ -1,0 +1,22 @@
+services:
+  web-vision-agent:
+    build: .
+    container_name: web-vision-agent
+    ports:
+      - "8080:8080"
+      - "5900:5900"
+    environment:
+      - LLM_URL=http://192.168.31.56:1234
+      - LLM_MODEL=gemma-4-e4b-it
+      - GROUNDING_URL=http://192.168.31.195:1234
+      - GROUNDING_MODEL=ui-tars-2b-sft
+      - DISPLAY_RESOLUTION=1920x1080x24
+      - API_PORT=8080
+      - VNC_ENABLED=true
+      - PAGE_LOAD_TIMEOUT=12
+      - OPERATION_TIMEOUT=120
+      - LLM_TIMEOUT=30
+      - MAX_SCROLL_SECTIONS=4
+      - MAX_POPUP_ATTEMPTS=3
+    shm_size: '512m'
+    restart: unless-stopped
