@@ -96,6 +96,14 @@ class ClickRequest(BaseModel):
     target: str
 
 
+class SearchRequest(BaseModel):
+    query: str
+
+
+class ContentRequest(BaseModel):
+    full_page: bool = False
+
+
 # --- Helpers ---
 
 
@@ -289,3 +297,31 @@ async def health_check():
         "browser": "running",
         "display": "active",
     }
+
+
+@app.post("/search")
+async def search_page(request: SearchRequest):
+    """Find the search field on the current page, type a query, submit, and analyze results."""
+    check_busy()
+
+    generator = page_analyzer.search_page(request.query)
+
+    async def event_stream():
+        async for event in run_with_timeout(generator, "search"):
+            yield event
+
+    return EventSourceResponse(event_stream())
+
+
+@app.post("/content")
+async def content_page(request: ContentRequest):
+    """Analyze the main content area of the current page."""
+    check_busy()
+
+    generator = page_analyzer.content_page(full_page=request.full_page)
+
+    async def event_stream():
+        async for event in run_with_timeout(generator, "content"):
+            yield event
+
+    return EventSourceResponse(event_stream())
