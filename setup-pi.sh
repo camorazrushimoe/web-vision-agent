@@ -32,7 +32,7 @@
 # - If port 8080 is busy → change API_PORT in docker-compose.yml
 # - If "shm" errors → the --shm-size flag is critical for Chromium
 # - If Chromium crashes inside container → check RAM: free -h (need 2GB+ free)
-# - If LLM servers unreachable → check: curl http://192.168.31.56:1234/v1/models
+# - If LLM servers unreachable → check: curl http://192.168.31.195:1234/v1/models
 #
 # AFTER SUCCESSFUL INSTALL:
 # - API is available at: http://<pi-ip>:8080
@@ -41,9 +41,8 @@
 # - Open a site: curl -N http://localhost:8080/open -H "Content-Type: application/json" -d '{"url":"https://example.com"}'
 #
 # NETWORK REQUIREMENTS:
-# - LLM server (Gemma 4): http://192.168.31.56:1234
-# - LLM server (UI-TARS): http://192.168.31.195:1234
-# - Both must be accessible from the Pi's network
+# - LLM servers available at http://192.168.31.195:1234 (Gemma + UI-TARS)
+# - Ensure the Pi can reach this host on port 1234
 # ============================================================
 
 set -e
@@ -105,18 +104,10 @@ fi
 echo ""
 echo "Checking LLM server connectivity..."
 
-if curl -s --max-time 5 http://192.168.31.56:1234/v1/models > /dev/null 2>&1; then
-    echo -e "${GREEN}✓ Gemma 4 server (192.168.31.56:1234) is reachable${NC}"
-else
-    echo -e "${YELLOW}⚠ Gemma 4 server (192.168.31.56:1234) is NOT reachable${NC}"
-    echo "  The agent will not work without this server."
-    echo "  Make sure LM Studio is running on that machine."
-fi
-
 if curl -s --max-time 5 http://192.168.31.195:1234/v1/models > /dev/null 2>&1; then
-    echo -e "${GREEN}✓ UI-TARS server (192.168.31.195:1234) is reachable${NC}"
+    echo -e "${GREEN}✓ LLM server (192.168.31.195:1234) is reachable${NC}"
 else
-    echo -e "${YELLOW}⚠ UI-TARS server (192.168.31.195:1234) is NOT reachable${NC}"
+    echo -e "${YELLOW}⚠ LLM server (192.168.31.195:1234) is NOT reachable${NC}"
     echo "  The agent will not work without this server."
     echo "  Make sure LM Studio is running on that machine."
 fi

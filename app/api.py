@@ -25,6 +25,7 @@ from debug_recorder import DebugRecorder, DEBUG_BASE_DIR
 logger = logging.getLogger("api")
 
 OPERATION_TIMEOUT = int(os.environ.get("OPERATION_TIMEOUT", "120"))
+CONTENT_OPERATION_TIMEOUT = int(os.environ.get("CONTENT_OPERATION_TIMEOUT", "180"))
 
 
 # --- State ---
@@ -107,7 +108,11 @@ class SearchRequest(BaseModel):
 
 
 class ContentRequest(BaseModel):
-    full_page: bool = False
+    max_top_screens: Optional[int] = None
+    max_bottom_screens: Optional[int] = None
+    max_middle_screens: Optional[int] = None
+    llm_batch_size: Optional[int] = None
+    overlap_stop_enabled: bool = True
 
 
 class DebugToggleRequest(BaseModel):
@@ -142,7 +147,12 @@ def _make_recorder(operation_name: str) -> Optional[DebugRecorder]:
     return DebugRecorder(operation_id=operation_id, operation_name=operation_name)
 
 
-async def run_with_timeout(generator, operation: str, operation_id: str = ""):
+async def run_with_timeout(
+    generator,
+    operation: str,
+    operation_id: str = "",
+    timeout: int = OPERATION_TIMEOUT,
+):
     """
     Wrap an async generator with timeout and state management.
     Yields SSE events.
@@ -199,7 +209,7 @@ async def run_with_timeout(generator, operation: str, operation_id: str = ""):
                     }
 
         # Run with timeout
-        deadline = time.time() + OPERATION_TIMEOUT
+        deadline = time.time() + timeout
 
         async for event in _produce_events():
             if time.time() > deadline:
@@ -208,7 +218,7 @@ async def run_with_timeout(generator, operation: str, operation_id: str = ""):
                     "data": json.dumps(
                         {
                             "stage": "timeout",
-                            "message": f"Operation timed out after {OPERATION_TIMEOUT} seconds",
+                            "message": f"Operation timed out after {timeout} seconds",
                             "current_url": last_url,
                             "details": "Operation took too long. Agent returned to idle state. You can retry.",
                             "recovery": "Agent returned to idle state. You can retry the request.",
@@ -353,13 +363,25 @@ async def content_page(request: ContentRequest):
     """Analyze the main content area of the current page."""
     check_busy()
     recorder = _make_recorder("content")
-    generator = page_analyzer.content_page(
-        full_page=request.full_page, recorder=recorder
-    )
+    kwargs = {}
+    if request.max_top_screens is not None:
+        kwargs["max_top_screens"] = request.max_top_screens
+    if request.max_bottom_screens is not None:
+        kwargs["max_bottom_screens"] = request.max_bottom_screens
+    if request.max_middle_screens is not None:
+        kwargs["max_middle_screens"] = request.max_middle_screens
+    if request.llm_batch_size is not None:
+        kwargs["llm_batch_size"] = request.llm_batch_size
+    kwargs["overlap_stop_enabled"] = request.overlap_stop_enabled
+
+    generator = page_analyzer.content_page(recorder=recorder, **kwargs)
 
     async def event_stream():
         async for event in run_with_timeout(
-            generator, "content", operation_id=recorder.operation_id if recorder else ""
+            generator,
+            "content",
+            operation_id=recorder.operation_id if recorder else "",
+            timeout=CONTENT_OPERATION_TIMEOUT,
         ):
             yield event
 

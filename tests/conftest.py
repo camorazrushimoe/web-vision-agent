@@ -61,6 +61,8 @@ def mock_browser(monkeypatch):
     monkeypatch.setattr(browser_control, "press_key", AsyncMock())
     monkeypatch.setattr(browser_control, "scroll_down", AsyncMock())
     monkeypatch.setattr(browser_control, "scroll_to_top", AsyncMock())
+    monkeypatch.setattr(browser_control, "scroll_up", AsyncMock())
+    monkeypatch.setattr(browser_control, "scroll_to_bottom", AsyncMock())
     monkeypatch.setattr(
         browser_control, "is_browser_running", AsyncMock(return_value=True)
     )
@@ -95,16 +97,31 @@ INPUT_FIELDS_OK = {
     ]
 }
 
-CONTENT_OK = {
-    "content_type": "product_list",
-    "content_summary": "List of products",
-    "items_count": 2,
-    "items": [
-        {"index": 1, "label": "Product A", "description": "10 USD"},
-        {"index": 2, "label": "Product B", "description": "20 USD"},
-    ],
-    "text_summary": "Page shows 2 products.",
-    "clickable_elements": ["Product A card", "Product B card"],
+CONTENT_BATCH_OK = {
+    "page_type_hint": "product_list",
+    "top": {
+        "navigation_items": ["Home", "Catalog"],
+        "hero_or_title": "Shop",
+        "ctas": [],
+    },
+    "middle": {"themes": ["products"], "key_sections": []},
+    "bottom": {"footer_links": ["About"], "copyright_or_org": "© 2024"},
+}
+
+CONTENT_MERGE_OK = {
+    "page_type": "product_list",
+    "content_summary": "A product catalog page.",
+    "top_context": {
+        "navigation_items": ["Home", "Catalog"],
+        "hero_or_title": "Shop",
+        "ctas": [],
+    },
+    "middle_context": {
+        "themes": ["products"],
+        "key_sections": [],
+        "items_count_estimate": 0,
+    },
+    "bottom_context": {"footer_links": ["About"], "copyright_or_org": "© 2024"},
 }
 
 COORDS_FOUND = {"found": True, "x": 500, "y": 80}
@@ -126,7 +143,12 @@ def mock_llm(monkeypatch):
         llm_client, "detect_input_fields", AsyncMock(return_value=INPUT_FIELDS_OK)
     )
     monkeypatch.setattr(
-        llm_client, "analyze_page_content", AsyncMock(return_value=CONTENT_OK)
+        llm_client,
+        "analyze_page_content_batch",
+        AsyncMock(return_value=CONTENT_BATCH_OK),
+    )
+    monkeypatch.setattr(
+        llm_client, "merge_content_analyses", AsyncMock(return_value=CONTENT_MERGE_OK)
     )
     monkeypatch.setattr(
         llm_client, "detect_popup", AsyncMock(return_value={"popup_detected": False})

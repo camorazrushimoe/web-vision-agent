@@ -1,161 +1,348 @@
 """
-Tests for page_analyzer.py — content_page flow.
+Tests for page_analyzer.py — content_page flow (content-analysis-v2).
 
 Covers:
-- full_page=False: single screenshot, result contains content fields
-- full_page=True: multiple screenshots collected via scroll
-- full_page=True: scroll stops early when page ends (pixel_diff < 1%)
-- analyze_page_content returns None → error event, no AttributeError
-- Result always contains all expected keys
+- Happy path: result contains all expected top/middle/bottom context fields
+- Top/bottom region capture: correct scroll functions called
+- Short page: middle capture skipped
+- overlap_stop_enabled=False: middle always skipped
+- Single batch (≤ llm_batch_size): merge step skipped, result reshaped directly
+- Multiple batches: merge step called
+- One batch returns None: continues with rest, no analysis_failed
+- All batches return None: error event analysis_failed
+- merge returns None: error event merge_failed
+- scroll_to_top called after capture phase (at least twice)
+- recorder=None accepted without error
+- SSE stages emitted: capturing_top, capturing_bottom, analyzing
 """
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from conftest import make_image, CONTENT_OK, collect, result_event, error_events
+from conftest import (
+    make_image,
+    make_different_image,
+    CONTENT_BATCH_OK,
+    CONTENT_MERGE_OK,
+    collect,
+    result_event,
+    error_events,
+)
 
 
 # ---------------------------------------------------------------------------
-# full_page=False (default)
+# Happy path — result structure
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_content_page_single_screenshot(mock_browser, mock_llm):
-    """full_page=False → one screenshot taken, result has content fields."""
-    import page_analyzer
-
-    events = await collect(page_analyzer.content_page(full_page=False))
-    res = result_event(events)
-
-    assert res is not None
-    assert res["type"] == "result"
-    assert res["content_type"] == "product_list"
-    assert res["items_count"] == 2
-    assert len(res["items"]) == 2
-    assert res["full_page"] is False
-    assert res["sections_analyzed"] == 1
 
 
 @pytest.mark.asyncio
 async def test_content_page_result_has_all_keys(mock_browser, mock_llm):
-    """All expected keys must be present in the result."""
     import page_analyzer
 
     events = await collect(page_analyzer.content_page())
     res = result_event(events)
-
+    assert res is not None
+    assert res["type"] == "result"
     for key in (
-        "content_type",
+        "current_url",
+        "page_type",
         "content_summary",
-        "items_count",
-        "items",
-        "text_summary",
-        "clickable_elements",
-        "sections_analyzed",
-        "full_page",
+        "top_context",
+        "middle_context",
+        "bottom_context",
+        "screenshots_taken",
+        "batches_sent",
     ):
         assert key in res, f"Missing key: {key}"
 
 
-# ---------------------------------------------------------------------------
-# full_page=True — scroll behavior
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_content_page_full_page_scrolls(mock_browser, mock_llm):
-    """full_page=True → scroll_down called, multiple screenshots collected."""
-    import browser_control
+async def test_content_page_top_context_structure(mock_browser, mock_llm):
     import page_analyzer
 
-    # Each take_screenshot returns a different image so scrolling continues
-    mock_browser.take_screenshot = AsyncMock(
-        side_effect=[
-            make_image((255, 255, 255)),  # section 1
-            make_image((200, 200, 200)),  # diff check 1 (different → continue)
-            make_image((200, 200, 200)),  # section 2
-            make_image((100, 100, 100)),  # diff check 2 (different → continue)
-            make_image((100, 100, 100)),  # section 3
-            make_image((50, 50, 50)),  # diff check 3 (different → continue)
-            make_image((50, 50, 50)),  # section 4 (MAX_SCROLL_SECTIONS=4)
-        ]
-    )
-    # pixel_difference always returns big diff → page keeps scrolling
-    mock_browser.pixel_difference = MagicMock(return_value=30.0)
-
-    events = await collect(page_analyzer.content_page(full_page=True))
+    events = await collect(page_analyzer.content_page())
     res = result_event(events)
-
-    assert res is not None
-    assert res["full_page"] is True
-    assert res["sections_analyzed"] == 4
-    assert mock_browser.scroll_down.call_count >= 1
+    top = res["top_context"]
+    assert "navigation_items" in top
+    assert "hero_or_title" in top
+    assert "ctas" in top
 
 
 @pytest.mark.asyncio
-async def test_content_page_full_page_stops_at_end(mock_browser, mock_llm):
-    """full_page=True: stops early when page doesn't scroll (pixel_diff < 1%)."""
+async def test_content_page_bottom_context_structure(mock_browser, mock_llm):
     import page_analyzer
 
-    mock_browser.pixel_difference = MagicMock(return_value=0.0)  # page end
-
-    events = await collect(page_analyzer.content_page(full_page=True))
+    events = await collect(page_analyzer.content_page())
     res = result_event(events)
-
-    assert res is not None
-    assert res["full_page"] is True
-    # Stopped after 1 section (took screenshot, tried to scroll, diff=0 → break)
-    assert res["sections_analyzed"] == 1
+    bottom = res["bottom_context"]
+    assert "footer_links" in bottom
+    assert "copyright_or_org" in bottom
 
 
 @pytest.mark.asyncio
-async def test_content_page_full_page_scrolls_to_top_after(mock_browser, mock_llm):
-    """full_page=True must scroll back to top after collecting screenshots."""
+async def test_content_page_middle_context_structure(mock_browser, mock_llm):
     import page_analyzer
 
-    await collect(page_analyzer.content_page(full_page=True))
+    events = await collect(page_analyzer.content_page())
+    res = result_event(events)
+    middle = res["middle_context"]
+    assert "themes" in middle
+    assert "key_sections" in middle
+    assert "items_count_estimate" in middle
 
+
+# ---------------------------------------------------------------------------
+# Scroll functions called
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_content_page_calls_scroll_to_top(mock_browser, mock_llm):
+    import page_analyzer
+
+    await collect(page_analyzer.content_page())
     mock_browser.scroll_to_top.assert_called()
 
 
+@pytest.mark.asyncio
+async def test_content_page_calls_scroll_to_bottom(mock_browser, mock_llm):
+    import page_analyzer
+
+    await collect(page_analyzer.content_page())
+    mock_browser.scroll_to_bottom.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_content_page_top_screenshots_taken(mock_browser, mock_llm):
+    import page_analyzer
+
+    mock_browser.pixel_difference = MagicMock(return_value=50.0)
+    events = await collect(page_analyzer.content_page(max_top_screens=2))
+    res = result_event(events)
+    assert res is not None
+    assert res["screenshots_taken"] >= 2
+
+
 # ---------------------------------------------------------------------------
-# Error: analyze_page_content returns None
+# Short page — middle skipped
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_content_page_llm_returns_none(mock_browser, mock_llm):
-    """analyze_page_content returns None → error event, no AttributeError."""
+async def test_content_page_short_page_no_middle(mock_browser, mock_llm):
     import page_analyzer
 
-    mock_llm.analyze_page_content = AsyncMock(return_value=None)
-
+    mock_browser.pixel_difference = MagicMock(return_value=0.0)
     events = await collect(page_analyzer.content_page())
+    res = result_event(events)
+    assert res is not None
+    stage_events = [e.get("stage") for e in events if "stage" in e]
+    assert "capturing_middle" not in stage_events
 
+
+# ---------------------------------------------------------------------------
+# overlap_stop_enabled=False → no middle
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_content_page_overlap_stop_disabled_no_middle(mock_browser, mock_llm):
+    import page_analyzer
+
+    mock_browser.pixel_difference = MagicMock(return_value=50.0)
+    events = await collect(page_analyzer.content_page(overlap_stop_enabled=False))
+    res = result_event(events)
+    assert res is not None
+    stage_events = [e.get("stage") for e in events if "stage" in e]
+    assert "capturing_middle" not in stage_events
+
+
+# ---------------------------------------------------------------------------
+# Single batch — merge skipped
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_content_page_single_batch_no_merge(mock_browser, mock_llm):
+    import page_analyzer
+
+    mock_browser.pixel_difference = MagicMock(return_value=0.0)
+    events = await collect(page_analyzer.content_page(llm_batch_size=10))
+    res = result_event(events)
+    assert res is not None
+    mock_llm.merge_content_analyses.assert_not_called()
+    stage_events = [e.get("stage") for e in events if "stage" in e]
+    assert "merging" not in stage_events
+
+
+@pytest.mark.asyncio
+async def test_content_page_single_batch_result_reshaped(mock_browser, mock_llm):
+    import page_analyzer
+
+    mock_browser.pixel_difference = MagicMock(return_value=0.0)
+    events = await collect(page_analyzer.content_page(llm_batch_size=10))
+    res = result_event(events)
+    assert res is not None
+    assert res["page_type"] == CONTENT_BATCH_OK["page_type_hint"]
+    assert res["top_context"] == CONTENT_BATCH_OK["top"]
+    assert res["bottom_context"] == CONTENT_BATCH_OK["bottom"]
+
+
+# ---------------------------------------------------------------------------
+# Multiple batches — merge called
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_content_page_multiple_batches_merge_called(mock_browser, mock_llm):
+    import page_analyzer
+
+    mock_browser.pixel_difference = MagicMock(return_value=50.0)
+    events = await collect(
+        page_analyzer.content_page(
+            max_top_screens=2, max_bottom_screens=2, llm_batch_size=1
+        )
+    )
+    res = result_event(events)
+    assert res is not None
+    mock_llm.merge_content_analyses.assert_called_once()
+    assert res["page_type"] == CONTENT_MERGE_OK["page_type"]
+    assert res["content_summary"] == CONTENT_MERGE_OK["content_summary"]
+
+
+@pytest.mark.asyncio
+async def test_content_page_multiple_batches_merging_stage_emitted(
+    mock_browser, mock_llm
+):
+    import page_analyzer
+
+    mock_browser.pixel_difference = MagicMock(return_value=50.0)
+    events = await collect(
+        page_analyzer.content_page(
+            max_top_screens=2, max_bottom_screens=2, llm_batch_size=1
+        )
+    )
+    stage_events = [e.get("stage") for e in events if "stage" in e]
+    assert "merging" in stage_events
+
+
+# ---------------------------------------------------------------------------
+# Error: one batch returns None — continues with rest
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_content_page_one_batch_none_continues(mock_browser, mock_llm):
+    import page_analyzer
+
+    mock_browser.pixel_difference = MagicMock(return_value=0.0)
+    mock_llm.analyze_page_content_batch = AsyncMock(
+        side_effect=[None, CONTENT_BATCH_OK]
+    )
+    events = await collect(
+        page_analyzer.content_page(
+            max_top_screens=1, max_bottom_screens=1, llm_batch_size=1
+        )
+    )
+    errs = error_events(events)
+    analysis_failed = [e for e in errs if e.get("stage") == "analysis_failed"]
+    assert len(analysis_failed) == 0
+
+
+# ---------------------------------------------------------------------------
+# Error: all batches return None → analysis_failed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_content_page_all_batches_none_error(mock_browser, mock_llm):
+    import page_analyzer
+
+    mock_llm.analyze_page_content_batch = AsyncMock(return_value=None)
+    events = await collect(page_analyzer.content_page())
     assert result_event(events) is None
     errs = error_events(events)
     assert len(errs) > 0
     assert errs[0]["stage"] == "analysis_failed"
 
 
+# ---------------------------------------------------------------------------
+# Error: merge returns None → merge_failed
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_content_page_llm_partial_response(mock_browser, mock_llm):
-    """LLM returns partial dict (missing keys) → result uses .get() defaults, no crash."""
+async def test_content_page_merge_returns_none_error(mock_browser, mock_llm):
     import page_analyzer
 
-    mock_llm.analyze_page_content = AsyncMock(
-        return_value={
-            "content_type": "unknown"
-            # all other keys missing
-        }
+    mock_browser.pixel_difference = MagicMock(return_value=50.0)
+    mock_llm.merge_content_analyses = AsyncMock(return_value=None)
+    events = await collect(
+        page_analyzer.content_page(
+            max_top_screens=2, max_bottom_screens=2, llm_batch_size=1
+        )
     )
+    assert result_event(events) is None
+    errs = error_events(events)
+    assert len(errs) > 0
+    assert errs[0]["stage"] == "merge_failed"
+
+
+# ---------------------------------------------------------------------------
+# scroll_to_top called after capture (at least 2 times)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_content_page_scroll_to_top_after_capture(mock_browser, mock_llm):
+    import page_analyzer
+
+    await collect(page_analyzer.content_page())
+    assert mock_browser.scroll_to_top.call_count >= 2
+
+
+# ---------------------------------------------------------------------------
+# recorder=None accepted
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_content_page_recorder_none_accepted(mock_browser, mock_llm):
+    import page_analyzer
+
+    events = await collect(page_analyzer.content_page(recorder=None))
+    res = result_event(events)
+    assert res is not None
+    assert res["type"] == "result"
+
+
+# ---------------------------------------------------------------------------
+# SSE stages
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_content_page_emits_capturing_top_stage(mock_browser, mock_llm):
+    import page_analyzer
 
     events = await collect(page_analyzer.content_page())
-    res = result_event(events)
+    stage_events = [e.get("stage") for e in events if "stage" in e]
+    assert "capturing_top" in stage_events
 
-    assert res is not None
-    assert res["content_type"] == "unknown"
-    assert res["items"] == []
-    assert res["clickable_elements"] == []
-    assert res["items_count"] == 0
+
+@pytest.mark.asyncio
+async def test_content_page_emits_capturing_bottom_stage(mock_browser, mock_llm):
+    import page_analyzer
+
+    events = await collect(page_analyzer.content_page())
+    stage_events = [e.get("stage") for e in events if "stage" in e]
+    assert "capturing_bottom" in stage_events
+
+
+@pytest.mark.asyncio
+async def test_content_page_emits_analyzing_stage(mock_browser, mock_llm):
+    import page_analyzer
+
+    events = await collect(page_analyzer.content_page())
+    stage_events = [e.get("stage") for e in events if "stage" in e]
+    assert "analyzing" in stage_events

@@ -141,7 +141,7 @@ All parameters are set via environment variables in `docker-compose.yml`:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `LLM_URL` | `192.168.31.56:1234` | Gemma 4 server address |
+| `LLM_URL` | `192.168.31.195:1234` | Gemma 4 server address |
 | `LLM_MODEL` | `gemma-4-e4b-it` | Vision model name |
 | `GROUNDING_URL` | `192.168.31.195:1234` | UI-TARS server address |
 | `GROUNDING_MODEL` | `ui-tars-2b-sft` | Grounding model name |
