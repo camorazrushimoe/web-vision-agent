@@ -1,0 +1,7 @@
+pytest
+pytest-asyncio
+Pillow
+numpy
+httpx
+fastapi
+sse-starlette

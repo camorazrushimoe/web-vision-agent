@@ -207,6 +207,124 @@ async def analyze_full_page(screenshots: list[Image.Image]) -> Optional[dict]:
     return _parse_json_response(response)
 
 
+async def detect_input_fields(screenshot: Image.Image) -> Optional[dict]:
+    """
+    Detect input fields and forms on the page.
+    Returns dict with input_fields list (type, label, description).
+    Runs in parallel with analyze_page_structure — does NOT modify that function.
+    """
+    b64 = image_to_base64(screenshot)
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are analyzing a webpage screenshot to find input fields and forms.\n"
+                "Detect all visible input fields and forms. For each found element return:\n"
+                "- type: 'search' (single search field) or 'form' (multi-field form)\n"
+                "- label: short name in the page language\n"
+                "- description: precise visual description for locating this element —\n"
+                "  include position on page (top/center/bottom), placeholder text if visible,\n"
+                "  color/style of the field, text of the nearby submit button or icon.\n\n"
+                "Example description: 'white search field at the top center of the page, "
+                "placeholder Search..., with a magnifying glass icon button on the right'\n\n"
+                'If no input fields are visible, return: {"input_fields": []}\n\n'
+                "Return JSON only:\n"
+                '{"input_fields": [{"type": "search", "label": "...", "description": "..."}]}'
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                },
+                {
+                    "type": "text",
+                    "text": "Find all input fields and forms on this page. Return JSON only.",
+                },
+            ],
+        },
+    ]
+
+    response = await _call_llm(LLM_URL, LLM_MODEL, messages, max_tokens=512)
+    if response is None:
+        return {"input_fields": []}
+
+    result = _parse_json_response(response)
+    if result is None:
+        return {"input_fields": []}
+
+    # Ensure input_fields key always exists
+    if "input_fields" not in result:
+        return {"input_fields": []}
+
+    return result
+
+
+async def analyze_page_content(screenshots: list[Image.Image]) -> Optional[dict]:
+    """
+    Analyze the main content area of the page.
+    Returns content_type, items list, text_summary, clickable_elements.
+    Accepts multiple screenshots (full page scan), max 3 to avoid OOM on Pi.
+    """
+    if not screenshots:
+        return None
+
+    # Cap at 3 screenshots to avoid payload size / timeout issues on Raspberry Pi
+    capped = screenshots[:3]
+    b64_images = [image_to_base64(img) for img in capped]
+
+    content = []
+    for i, b64 in enumerate(b64_images):
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{b64}"},
+            }
+        )
+        if len(b64_images) > 1:
+            content.append(
+                {
+                    "type": "text",
+                    "text": f"[Section {i + 1} of {len(b64_images)}]",
+                }
+            )
+
+    content.append(
+        {
+            "type": "text",
+            "text": (
+                "You are analyzing the main content area of a webpage screenshot.\n\n"
+                "Your task:\n"
+                "1. Identify the content type from this list:\n"
+                "   product_list, product_detail, article, forum_thread_list, forum_thread,\n"
+                "   contact_page, landing, dashboard, empty, unknown\n"
+                "2. Count and list visible content items (products, posts, articles, etc.). "
+                "List up to 10 items.\n"
+                "3. For each item: short label and brief description "
+                "(price, rating, date — whatever is visible)\n"
+                "4. Identify clickable elements in the content area\n"
+                "5. Write a short text summary (2-3 sentences) describing what you see, "
+                "including any readable text on the page\n\n"
+                "Return JSON only:\n"
+                '{"content_type": "...", "content_summary": "...", "items_count": N, '
+                '"items": [{"index": 1, "label": "...", "description": "..."}], '
+                '"text_summary": "...", "clickable_elements": ["...", "..."]}'
+            ),
+        }
+    )
+
+    messages = [{"role": "user", "content": content}]
+
+    response = await _call_llm(LLM_URL, LLM_MODEL, messages, max_tokens=2048)
+    if response is None:
+        return None
+
+    return _parse_json_response(response)
+
+
 # --- Grounding (UI-TARS-2B) ---
 
 
